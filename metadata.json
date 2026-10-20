@@ -1,0 +1,6 @@
+{
+  "name": "Benim Yapay Zekâm",
+  "description": "Sıfır ayar ve anahtarsız çalışan; 4K görsel, video, seslendirme, sosyal medya & WhatsApp otomasyonu ve canlı görüntülü görüşme stüdyosu.",
+  "requestFramePermissions": ["microphone", "camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,68 @@
+{
+  "id": "/",
+  "name": "Benim Yapay Zekâm - Akıllı Stüdyo & Otopilot",
+  "short_name": "Benim AI",
+  "description": "Sıfır ayar ve anahtarsız çalışan; 4K görsel, video, seslendirme, sosyal medya otopilotu ve canlı görüntülü görüşme stüdyosu.",
+  "theme_color": "#2563eb",
+  "background_color": "#0b0f19",
+  "display": "standalone",
+  "orientation": "portrait",
+  "start_url": "/",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Sohbet & Akıllı Asistan",
+      "short_name": "Sohbet",
+      "description": "Yapay zekâ ile anında sohbet başlat",
+      "url": "/?tab=chat",
+      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "4K Görsel Üretimi",
+      "short_name": "Fotoğraf",
+      "description": "Ultra gerçekçi 4K görseller oluştur",
+      "url": "/?tab=image",
+      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Video & Sinematik Stüdyo",
+      "short_name": "Video",
+      "description": "60s sinematik videolar üret",
+      "url": "/?tab=video",
+      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Sosyal Medya Otopilotu",
+      "short_name": "Sosyal",
+      "description": "Instagram ve WhatsApp otomasyonu",
+      "url": "/?tab=autopilot",
+      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192" }]
+    }
+  ]
+}

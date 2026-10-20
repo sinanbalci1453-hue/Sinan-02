@@ -1,0 +1,6 @@
+{
+  "summary": "Plan to fix live call repetition issue by enforcing microphone muting during AI speech playback, updating server-side live-call-turn endpoint to utilize robust Gemini multi-turn conversation context, and adding duplicate transcript filtering.",
+  "updatedAt": "2026-10-18T11:36:14.239973818Z",
+  "requestFeedback": true,
+  "userFacing": true
+}
