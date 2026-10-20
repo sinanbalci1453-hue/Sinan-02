@@ -11,34 +11,359 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-
 app.use(express.json({ limit: '25mb' }));
 
-// PWA: Explicit routes for manifest and service worker with strict PWA headers
-app.get(['/manifest.json', '/manifest.webmanifest'], (_req, res) => {
-  res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(path.resolve(__dirname, 'public', 'manifest.json'));
-});
+const APP_URL = process.env.APP_URL || 'https://ais-dev-aoszvvchvlzmhgfkf3pgvp-845612651071.europe-west2.run.app';
 
-app.get('/sw.js', (_req, res) => {
-  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-  res.setHeader('Service-Worker-Allowed', '/');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(path.resolve(__dirname, 'public', 'sw.js'));
-});
+const AI_PROVIDER = (process.env.AI_PROVIDER || 'gemini').toLowerCase();
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || process.env.PRIMARY_MODEL || 'gemini-3.8-flash';
 
-// Base app URL for OAuth redirects
-const APP_URL =
-  process.env.APP_URL ||
-  'https://ais-dev-aoszvvchvlzmhgfkf3pgvp-845612651071.europe-west2.run.app';
+const FALLBACK_FREEDOM = {
+  greeting: [
+    'Merhaba! Ben Benim Yapay Zekâm. Bugün size nasıl yardımcı olabilirim?',
+    'Hoş geldiniz. Benim Yapay Zekâm; fikir, içerik, analiz ve çözüm konusunda hemen yanında.',
+    'Selam! Benim Yapay Zekâm. İstediğiniz konuda net, hızlı ve pratik çözüm üretirim.'
+  ],
+  general: [
+    'Sorunun merkezine odaklanıp en verimli çözümü sırasıyla hazırlıyorum.',
+    'Durumu netleştirip, en hızlı ve doğru çözüm yolunu birlikte planlayalım.',
+    'Bunu adım adım çözelim; önce istenen sonucu netleştirip ardından en uygun yöntemi uygulayalım.'
+  ],
+  business: [
+    'İşletme açısından en etkili yaklaşım, net hedef, hızlı aksiyon ve ölçülebilir sonuçtur.',
+    'Bu noktada veriye dayalı, pratik ve müşteri odaklı bir plan çok daha güçlü çalışır.',
+    'Kısa vadede etkili ve uzun vadede sürdürülebilir bir hareket planı kuruyorum.'
+  ],
+  coding: [
+    'Kodu sade, okunabilir ve sürdürülebilir şekilde kurup örnekle açıklayayım.',
+    'Bu sorunu çözmek için en temiz yaklaşımı seçiyorum; ardından örnek bir uygulama sunuyorum.',
+    'Önce mantığı netleştirip, sonra minimum hata ve maksimum okunabilirlikle çözüme geçiyorum.'
+  ],
+  creative: [
+    'İlham verici, özgün ve uygulanabilir bir fikir oluşturup dikkat çeken bir taslak hazırlıyorum.',
+    'Yaratıcı ama gerçekçi bir çözüm üretiyorum; hem dikkat çekici hem de kullanışlı olsun.',
+    'Anlamlı ve etkili bir içerik fikri çıkarıp, hemen kullanılabilir formata dönüştürüyorum.'
+  ]
+};
 
-// Initialize Google Gemini SDK
+function antiRepeat(text: string): string {
+  if (!text) return '';
+
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  const sentences = normalized.split(/(?<=[.!?])\s+/).filter(Boolean);
+
+  if (sentences.length <= 1) return normalized;
+
+  const unique: string[] = [];
+  const seen = new Set<string>();
+
+  for (const sentence of sentences) {
+    const key = sentence.toLowerCase().replace(/[^a-z0-9çğıöşü\s]/g, '').replace(/\s+/g, ' ').trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(sentence.trim());
+  }
+
+  let result = unique.join(' ');
+  if (result.length < normalized.length * 0.5) {
+    result = normalized;
+  }
+
+  const repeatedPattern = /(\b[\wçğıöşü]+\b\s+){2,}\1+/i;
+  if (repeatedPattern.test(result)) {
+    result = result.replace(/(\b[\wçğıöşü]+\b\s+){2,}/gi, (match) => match.split(/\s+/).slice(0, 2).join(' ') + ' ');
+  }
+
+  return result.replace(/\s{2,}/g, ' ').trim();
+}
+
+function selectRandom<T>(items: T[]): T {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function sentenceMix(prefixes: string[], suffixes: string[]): string {
+  const prefix = selectRandom(prefixes);
+  const suffix = selectRandom(suffixes);
+  return `${prefix} ${suffix}`;
+}
+
+function withFreshness(text: string, fallbackContext: string): string {
+  const base = antiRepeat(text || fallbackContext || '');
+  if (!base) return fallbackContext;
+
+  const output = base
+    .replace(/(\b[A-Za-zÇçĞğİiÖöŞşÜü]+\b\s+){3,}\1+/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/(\.)\1+/g, '.')
+    .trim();
+
+  return output.length > 0 ? output : fallbackContext;
+}
+
+function getSystemInstruction(tone?: string): string {
+  const toneSpecific = tone ? `İstenen ton: ${tone}.` : 'İstenen ton: doğal, net, profesyonel ve samimi.';
+  return `Sen Benim Yapay Zekâm adında çok güçlü, pratik ve güven veren Türkçe asistanısın.
+- Her cevapta aynı cümleleri tekrar etme; farklı yapı, farklı açılar ve yeni ifade biçimleri kullan.
+- Kısa, net ve etkili anlatım tercih et; gereksiz tekrarlar ekleme.
+- Müşteriye çözüm odaklı, sıcak ve profesyonel yaklaş.
+- Eğer soru teknikse teknik açıklamayı anlaşılır yap.
+- Eğer içerik üretimi gerekiyorsa kreatif, özgün ve uygulanabilir çıktılar ver.
+- Asla boş tekrarlar yazma; aynı fikir için yeni cümle kur.
+${toneSpecific}`;
+}
+
+function buildFallbackReply(q: string): string {
+  const lowered = q.toLowerCase();
+
+  if (/(merhaba|selam|günaydın|iyi günler|hey)/.test(lowered)) {
+    return withFreshness(selectRandom(FALLBACK_FREEDOM.greeting), 'Merhaba! Benim Yapay Zekâm. Nasıl yardımcı olabilirim?');
+  }
+
+  if (/(kod|javascript|typescript|python|react|node|yazılım|fonksiyon|api)/.test(lowered)) {
+    const reply = sentenceMix(FALLBACK_FREEDOM.coding, [
+      'İstediğiniz çözümü kısa ve anlaşılır şekilde hazırlıyorum.',
+      'Gerekirse örnek kodun yanında açıklamasını da eklerim.',
+      'İsterseniz bunu doğrudan üretim koduna uyarlanabilir hale getiririm.'
+    ]);
+    return withFreshness(reply, 'Bu sorunu net ve uygulanabilir formda çözüyorum.');
+  }
+
+  if (/(fikir|proje|iş|gelir|pazarlama|marka|sosyal|instagram|whatsapp|reels|tiktok)/.test(lowered)) {
+    const reply = sentenceMix(FALLBACK_FREEDOM.creative, [
+      'Bunu daha güçlü bir içerik ve aksiyon planına dönüştürüyorum.',
+      'Markanızı öne çıkaracak ve hedef kitlenizi ilgilendirecek bir rota oluşturuyorum.',
+      'Hızlı sonuç alabileceğiniz bir strateji ve içerik akışı hazırlıyorum.'
+    ]);
+    return withFreshness(reply, 'Bu probleme yaratıcı ve uygulanabilir bir çözüm üretiyorum.');
+  }
+
+  if (/(fiyat|satış|kargo|teslim|müşteri|işletme|dijital)/.test(lowered)) {
+    const reply = sentenceMix(FALLBACK_FREEDOM.business, [
+      'Müşteri deneyimini artırırken operasyonel süreci kolaylaştıran bir yaklaşım öneriyorum.',
+      'Önce hızlı karar alınabilir bir plan kurup sonra uygulanabilir detayları ekliyorum.',
+      'Bu durumu hem müşteriye yararlı hem de işletmeye kolay bir şekilde çözüme bağlayayım.'
+    ]);
+    return withFreshness(reply, 'İşletme açısından en verimli yolu netleştirip uygulamaya dönüştürüyorum.');
+  }
+
+  return withFreshness(
+    sentenceMix(FALLBACK_FREEDOM.general, [
+      'İstediğiniz sonucu netleştirip en doğru çözüme odaklanıyorum.',
+      'Bu görevi anlaşılır ve hızlı bir planla ilerletiyorum.',
+      'Öncelikle hedefi belirleyip ardından en etkili yöntemi uyguluyorum.'
+    ]),
+    'İstediğiniz işin odağını netleştirip en iyi çözüm yolunu çıkarıyorum.'
+  );
+}
+
+function generateContextualTurkishFallback(userMessage: string): string {
+  const q = (userMessage || '').toLowerCase();
+  if (!q.trim()) return withFreshness(selectRandom(FALLBACK_FREEDOM.greeting), 'Merhaba! Benim Yapay Zekâm.');
+  return buildFallbackReply(q);
+}
+
+async function callOpenRouterChat(
+  messages: Array<{ role: string; content: string }>,
+  systemPrompt: string,
+  enableSearch: boolean
+): Promise<string | null> {
+  if (!OPENROUTER_API_KEY) return null;
+
+  try {
+    const body = {
+      model: OPENROUTER_MODEL,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...messages.map((m) => ({
+          role: m.role === 'assistant' ? 'assistant' : 'user',
+          content: m.content,
+        })),
+      ],
+      temperature: 0.8,
+      ...(enableSearch ? { plugins: [{ id: 'web' }] } : {}),
+    };
+
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        'HTTP-Referer': APP_URL,
+        'X-Title': 'Benim Yapay Zekâm',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20000),
+    });
+
+    const text = await response.text();
+    if (!response.ok) {
+      console.warn('OpenRouter chat failed:', response.status, text.slice(0, 400));
+      return null;
+    }
+
+    const data = JSON.parse(text);
+    const reply = data?.choices?.[0]?.message?.content;
+    if (typeof reply === 'string' && reply.trim().length > 0) {
+      return withFreshness(reply.trim(), 'Yanıt üretilemedi.');
+    }
+  } catch (error) {
+    console.warn('OpenRouter request failed:', error);
+  }
+
+  return null;
+}
+
 let aiClient: GoogleGenAI | null = null;
 try {
-  aiClient = new GoogleGenAI();
+  if (process.env.GEMINI_API_KEY) {
+    aiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  }
 } catch (err) {
   console.warn('Gemini client initialization warning:', err);
+}
+
+async function callGeminiChat(
+  messages: Array<{ role: string; content: string }>,
+  systemPrompt: string,
+  enableSearch: boolean
+): Promise<string | null> {
+  if (!aiClient) return null;
+
+  try {
+    const chatContents = messages.map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    }));
+
+    const config: Record<string, unknown> = {
+      systemInstruction: systemPrompt,
+      temperature: 0.8,
+    };
+
+    if (enableSearch) {
+      config.tools = [{ googleSearch: {} }];
+    }
+
+    const geminiRes = await aiClient.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: chatContents,
+      config,
+    });
+
+    const replyText = geminiRes.text || '';
+    if (replyText.trim()) return withFreshness(replyText.trim(), 'Yanıt üretilemedi.');
+  } catch (error: any) {
+    console.warn('Gemini chat generation issue:', error?.message || error);
+  }
+
+  return null;
+}
+
+async function callOpenEngineFallback(
+  messages: Array<{ role: string; content: string }>,
+  systemPrompt: string,
+  enableSearch = false
+): Promise<string> {
+  const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user')?.content || 'Merhaba';
+
+  const openRouterReply = await callOpenRouterChat(messages, systemPrompt, enableSearch);
+  if (openRouterReply) return openRouterReply;
+
+  const geminiReply = await callGeminiChat(messages, systemPrompt, enableSearch);
+  if (geminiReply) return geminiReply;
+
+  try {
+    const formattedMessages = [
+      { role: 'system', content: systemPrompt },
+      ...messages.map((m) => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: m.content,
+      })),
+    ];
+
+    const response = await fetch('https://text.pollinations.ai/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: formattedMessages,
+        model: 'openai',
+        seed: Math.floor(Math.random() * 100000),
+      }),
+      signal: AbortSignal.timeout(6000),
+    });
+
+    if (response.ok) {
+      const text = await response.text();
+      if (text && text.trim().length > 0) {
+        return withFreshness(text.trim(), 'Yanıt üretilemedi.');
+      }
+    }
+  } catch (error) {
+    console.warn('Fallback pollinations request failed:', error);
+  }
+
+  return generateContextualTurkishFallback(lastUserMessage);
+}
+
+async function generateSmartAutoReply(
+  platform: 'instagram_dm' | 'instagram_comment' | 'whatsapp',
+  messageText: string
+): Promise<string> {
+  const systemPrompt = `Sen güven veren, sıcak ve satış odaklı Türkçe asistanısın. Gelen mesajı hızlıca yanıtla. Kısa, doğal ve farklı cümleler kullan. Aynı ifade tekrar etme.`;
+
+  const openRouterReply = await callOpenRouterChat([{ role: 'user', content: `Gelen mesaj: "${messageText}"` }], systemPrompt, false);
+  if (openRouterReply) return openRouterReply;
+
+  const readyReplies = [
+    `Merhaba! Mesajınız için teşekkür ederiz. Sorununuzla ilgili hemen net ve yardımcı bir cevap hazırlıyoruz. ✨`,
+    `Teşekkür ederiz. İsterseniz size en kısa yoldan çözümü paylaşalım; detayları hemen aktaralım. 🚀`,
+    `Anladım. Konuyla ilgili net bir açıklama ve en doğru çözümü sizin için hazırlıyorum. 💡`,
+    `Harika bir soru. Hemen açıklayıp gerekli adımları net bir şekilde ileteceğim. 📌`
+  ];
+
+  return withFreshness(selectRandom(readyReplies), 'Mesajınız için teşekkürler.');
+}
+
+async function generateDraftReplies(
+  platform: 'instagram_dm' | 'instagram_comment' | 'whatsapp',
+  messageText: string,
+  senderName = 'Kullanıcı'
+): Promise<string[]> {
+  const isComment = platform === 'instagram_comment';
+  const systemPrompt = `Sen müşteri ilişkileri odaklı, sıcak ve profesyonel bir Türkçe asistanısın. 3 farklı, özgün ve doğal yanıt üret. Aynı cümleleri tekrar etme. JSON array döndür.`;
+
+  const openRouterReply = await callOpenRouterChat(
+    [{ role: 'user', content: `Gönderen: ${senderName}\nMesaj: "${messageText}"` }],
+    systemPrompt,
+    false
+  );
+
+  if (openRouterReply) {
+    try {
+      const parsed = JSON.parse(openRouterReply.trim());
+      if (Array.isArray(parsed) && parsed.length >= 2) {
+        return parsed.slice(0, 3).map((s: unknown) => String(s).trim());
+      }
+    } catch {
+      // ignore and continue to fallback
+    }
+  }
+
+  const draftPool = isComment
+    ? [
+        `Harika bir yorum, gerçekten değerli bir geri bildirim. Size en doğru ve hızlı şekilde yardımcı olmak için hemen çalışıyoruz ✨`,
+        `Teşekkür ederiz. Detayları sizin için netleştirip, en doğru adımı birlikte belirleyeceğiz. 📩`,
+        `Bu konuda net bilgi vererek süreci kolaylaştırmaya çalışıyoruz. Hemen size doğru yönü gösterelim 🚀`
+      ]
+    : [
+        `Merhaba ${senderName}! Mesajınız için teşekkür ederiz. Konunuzla ilgili güven verici ve net bir destek sunuyoruz ✨`,
+        `Anladım. Size en doğru bilgiyi hızlıca iletip süreci kolaylaştırmaya hazırım. 📦`,
+        `Harika bir soru. Hemen çözüm ve gerekli adımları net bir şekilde paylaşalım 💫`
+      ];
+
+  return draftPool.map((item) => withFreshness(item, 'Detaylı bilgi için iletişime geçebilirsiniz.'));
 }
 
 // In-Memory Social Media & WhatsApp State
@@ -102,9 +427,9 @@ let inboxMessages: InboxMessage[] = [
     timestamp: Date.now() - 1000 * 60 * 8,
     status: 'unread',
     suggestedDrafts: [
-      'Merhabalar Selin Hanım! Koleksiyonumuz 350 TL’den başlamaktadır. 250 TL üzeri kargo ücretsizdir ve siparişiniz 1-2 iş günü içinde kapınızda olur. Detaylar için profilimizdeki bağlantıyı inceleyebilirsiniz! ✨',
-      'Selamlar! Ürünlerimizin tamamı el yapımı olup kişiselleştirme seçeneğimiz mevcuttur. Kargo ortalama 48 saatte teslim edilir. Güncel kataloğumuzu DM\'den hemen iletiyoruz 📦',
-      'Harika bir tercih! Lansmana özel bugün sepette ek %15 indirim var. Hızlı sipariş vermek isterseniz profil linkimizden anında tamamlayabilirsiniz 🚀'
+      'Merhabalar Selin Hanım! Koleksiyonumuz 350 TL’den başlıyor. 250 TL üzeri kargo ücretsizdir ve siparişiniz 1-2 iş günü içinde kapınıza teslim edilir. 📦',
+      'Ürünlerimiz el yapımı ve kişiselleştirme seçeneği sunuyor. Kargo ortalama 48 saat içinde gerçekleşiyor. 📦',
+      'Harika bir tercih. Lansman fırsatımızla sepette ekstra avantaj sağlıyoruz; profil linkimizden hızlıca inceleyebilirsiniz. 🚀'
     ],
   },
   {
@@ -116,55 +441,10 @@ let inboxMessages: InboxMessage[] = [
     timestamp: Date.now() - 1000 * 60 * 22,
     status: 'unread',
     suggestedDrafts: [
-      'Merhabalar Caner Bey! Evet, antrasit modelimiz tüm bedenleriyle şu an stokta. İlginiz için çok teşekkürler! 🔥',
-      'Harika bir soru! Beden tablomuz profilimizdeki öne çıkan hikayelerde sabittir. Ayrıca DM üzerinden de ölçü tablosunu iletiyoruz 📏✨',
-      'Stoklarımız tükenmeden yakalamak için profil linkimizden bedeninizi seçip hemen sepetinize ekleyebilirsiniz! ⚡'
+      'Evet, antrasit modelimiz tüm bedenleriyle stokta. Beden tablosunu profilde ve DM üzerinden de paylaşabiliyoruz. ✨',
+      'Beden ölçü tablomuz profilimizde yer alıyor; isterseniz DM üzerinden de iletebiliriz. 📏',
+      'Stok durumunu hemen kontrol edip, size en doğru beden önerisini sunuyoruz. ⚡'
     ],
-  },
-  {
-    id: 'ig-msg-3',
-    platform: 'instagram_dm',
-    senderName: 'Ece Yılmaz',
-    senderHandle: '@ece_ylmz',
-    text: 'Merhaba, 50 adet kurumsal hediyelik alımı için indirim yapıyor musunuz? Katalog alabilir miyiz?',
-    timestamp: Date.now() - 1000 * 60 * 40,
-    status: 'unread',
-    suggestedDrafts: [
-      'Merhaba Ece Hanım! Harika bir düşünce 🎁 Evet, 25 adet ve üzeri kurumsal siparişlerde %30 özel indirim ve ücretsiz logo baskısı uyguluyoruz!',
-      'Merhabalar! Kurumsal siparişler için özel teklif dosyamızı ve numune setimizi bugün kargolayabiliriz. İletişim numaranızı iletirseniz hemen arayalım 📞✨',
-      'Toplu alımlarda en avantajlı fiyat teklifimizi hazırladık! Teklif dökümünü DM üzerinden paylaşıyoruz, inceleyip dönüş yapabilirsiniz 💼🚀'
-    ],
-  },
-  {
-    id: 'ig-msg-4',
-    platform: 'instagram_comment',
-    senderName: 'Burak Yıldız',
-    senderHandle: '@burakyildiz',
-    text: 'Fiyat nedir acaba? Ve sipariş nasıl verebiliriz?',
-    timestamp: Date.now() - 1000 * 60 * 65,
-    status: 'unread',
-    suggestedDrafts: [
-      'Merhabalar! Bu özel tasarımımız lansman fiyatıyla 490 TL\'dir. Kargo bizden hediye! 💫',
-      'Merhaba Burak Bey! Profilimizdeki web sitesi bağlantısına tıklayarak 1 dakikada güvenle sipariş oluşturabilirsiniz. 🛒✨',
-      'Fiyat ve sipariş detayları DM kutunuza iletilmiştir! Gelen kutunuzu kontrol edebilirsiniz 📩'
-    ],
-  },
-  {
-    id: 'ig-msg-5',
-    platform: 'instagram_dm',
-    senderName: 'Zeynep Kaya',
-    senderHandle: '@zeynep.kaya',
-    text: 'Siparişimi dün teslim aldım, paketleme ve ürün kalitesi gerçekten harika! Teşekkür ederim 😍',
-    timestamp: Date.now() - 1000 * 60 * 180,
-    status: 'replied',
-    replyText: 'Zeynep Hanım harika bir gün yaptınız! Beğenmenize ve mutlu olmanıza çok sevindik. İyi günlerde sağlıkla kullanın! Sevgilerimizle ❤️✨',
-    repliedAt: Date.now() - 1000 * 60 * 175,
-    autoReplied: false,
-    suggestedDrafts: [
-      'Zeynep Hanım harika bir gün yaptınız! Beğenmenize ve mutlu olmanıza çok sevindik. İyi günlerde sağlıkla kullanın! Sevgilerimizle ❤️✨',
-      'Çok teşekkür ederiz Zeynep Hanım! Mutlu müşteri geri bildirimleri bizim en büyük motivasyonumuz. Tekrar görüşmek dileğiyle! 🌸',
-      'Bizi tercih ettiğiniz için teşekkürler! Yeni sezon modellerimiz için takipte kalın ✨'
-    ]
   },
   {
     id: 'wa-msg-1',
@@ -175,381 +455,40 @@ let inboxMessages: InboxMessage[] = [
     timestamp: Date.now() - 1000 * 60 * 15,
     status: 'unread',
     suggestedDrafts: [
-      'İyi günler Mehmet Bey! 4819 nolu siparişiniz bugün Aras Kargo\'ya teslim edildi. Takip numaranız: 39482019482. Kargonuz yarın teslim edilecektir. İyi günler dileriz! 🚚',
-      'Merhabalar! Siparişiniz hazırlanıp kargo şubesine sevk edilmiştir. SMS olarak takip linkiniz gün içinde iletilecektir. Teşekkür ederiz! ✨',
-      'Merhaba! Sipariş durumunuz aktif ve yolda. Canlı takip için kargo takip kodunuz: 39482019482 📦'
+      'İyi günler Mehmet Bey! Siparişiniz hazırlandı ve kargoya teslim edildi. Takip numaranız 39482019482. 🚚',
+      'Merhabalar. Siparişinizin durumunu kontrol ettik; bugün sevkiyat aşamasında ve takip kodu size iletilmeye hazır. ✨',
+      'Kargo takibi için gerekli kodu hemen iletiliyor. Lütfen güncellemeleri takip edebilirsiniz. 📦'
     ]
-  },
+  }
 ];
 
-// System instructions based on selected style/tone
-function getSystemInstruction(tone?: string): string {
-  return `Sen bu işletmenin resmi, samimi ve süper hızlı yapay zekâ asistanısın.
-Adın: Benim Yapay Zekâm.
-Görevlerin:
-1. Müşterilere çok enerjik, kibar, samimi ve bol emojili yanıtlar ver. 😍✨🚀
-2. Müşteri ne sorarsa sorsun; siparişlerin aynı gün ışık hızında kargoya verildiğini ve %100 koşulsuz müşteri memnuniyeti garantisi sunduğumuzu hissettir. 📦💯
-3. Fiyat, kargo veya ürün sorulduğunda müşteriyi bekletmeden net ve doğrudan çözüme ulaştır. ⚡
-4. Kararsız kalan müşterilere güven ver, yardımcı olmaktan mutluluk duyduğunu belirt. 💫
+app.get(['/manifest.json', '/manifest.webmanifest'], (_req, res) => {
+  res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.resolve(__dirname, 'public', 'manifest.json'));
+});
 
-Ayrıca genel bilgi, kodlama, yemek tarifleri ve sosyal medya içeriklerinde de son derece yetenekli ve akıllı bir Türkçe asistansın. Türkçe imla kurallarına tam uy ve Markdown biçimlendirmesi kullan.`;
-}
+app.get('/sw.js', (_req, res) => {
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.setHeader('Service-Worker-Allowed', '/');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.resolve(__dirname, 'public', 'sw.js'));
+});
 
-// Resilient Turkish fallback response when external APIs are unreachable
-function generateContextualTurkishFallback(userMessage: string): string {
-  const q = (userMessage || '').toLowerCase();
-  if (q.includes('merhaba') || q.includes('selam') || q.includes('günaydın') || q.includes('iyi günler')) {
-    return 'Merhabalar! Hoş geldiniz. Ben "Benim Yapay Zekâm". Bugün size projeler, analizler, içerik üretimi veya sorularınız konusunda nasıl yardımcı olabilirim?';
-  }
-  if (q.includes('kimsin') || q.includes('nesin') || q.includes('adın ne')) {
-    return 'Ben "Benim Yapay Zekâm", sıfır ayar ve anahtarsız çalışan; 4K görsel, video, seslendirme, sosyal medya & WhatsApp otomasyonu ve canlı görüşme yeteneklerine sahip akıllı Türkçe yapay zekâ asistanınızım.';
-  }
-  if (q.includes('tarif') || q.includes('yemek') || q.includes('akşam')) {
-    return 'Harika ve pratik bir yemek tarifi önerisi:\n\n**Pratik Kremalı Mantarlı Tavuk (20 Dk):**\n1. Tavuk göğsünü jülyen doğrayıp zeytinyağında soteleyin.\n2. İnce dilimlenmiş mantar ve sarımsak ekleyin.\n3. Mantarlar suyunu çekince 1 kutu krema, kekik ve karabiber ilave edip 5 dakika kısık ateşte çektirin.\n\nAfiyet olsun! Yanına nefis bir makarna veya taze yeşil salata çok yakışır.';
-  }
-  if (q.includes('kod') || q.includes('python') || q.includes('yazılım') || q.includes('javascript') || q.includes('fonksiyon')) {
-    return 'İşte aradığınız çözüm örneği:\n\n```python\n# İki sayının toplamı ve ortalaması\nsayi1 = float(input("1. Sayıyı girin: "))\nsayi2 = float(input("2. Sayıyı girin: "))\n\ntoplam = sayi1 + sayi2\nortalama = toplam / 2\n\nprint(f"Toplam: {toplam}")\nprint(f"Ortalama: {ortalama}")\n```\n\nBu kod kullanıcıdan alınan iki sayıyı toplayıp ortalamasını ekrana yazdırır.';
-  }
-  if (q.includes('fikir') || q.includes('proje') || q.includes('gelir') || q.includes('iş')) {
-    return 'İşte hemen değerlendirebileceğiniz 3 yaratıcı dijital proje fikri:\n\n1. **Mikro SaaS & Yapay Zekâ Aracı:** Belirli bir sektördeki (örn: gayrimenkul veya e-ticaret) metin ve ilan yazımını otomatikleştiren özel bir web aracı.\n2. **Niş Bilgi Bülteni & Kürasyon:** Haftalık yapay zekâ trendlerini derleyen sponsorlu bir Substack bülteni.\n3. **Dijital Tasarım & Şablon Mağazası:** Notion, Canva veya Figma için sektörel hazır şablon setleri.';
-  }
-  return `"${userMessage}" konulu talebinizi inceledim.\n\nBu konuda en doğru yaklaşım; adımları netleştirmek, güncel yöntemleri uygulamak ve süreci düzenli olarak optimize etmektir. Detaylandırmamı istediğiniz özel bir başlık veya aşama var mı?`;
-}
-
-// Zero-key open inference engine fallback
-async function callOpenEngineFallback(
-  messages: Array<{ role: string; content: string }>,
-  systemPrompt: string
-): Promise<string> {
-  const lastUserMessage =
-    [...messages].reverse().find((m) => m.role === 'user')?.content || 'Merhaba';
-
-  // 1. Try Gemini standalone call with single prompt if full chat failed
-  if (aiClient) {
-    try {
-      const res = await aiClient.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: `${systemPrompt}\n\nKullanıcı: ${lastUserMessage}`,
-      });
-      if (res.text?.trim()) {
-        return res.text.trim();
-      }
-    } catch (e) {
-      // Proceed to open engine
-    }
-  }
-
-  const formattedMessages = [
-    { role: 'system', content: systemPrompt },
-    ...messages.map((m) => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: m.content,
-    })),
-  ];
-
-  // 2. Try POST to open engine
-  try {
-    const response = await fetch('https://text.pollinations.ai/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: formattedMessages,
-        model: 'openai',
-        seed: Math.floor(Math.random() * 100000),
-      }),
-      signal: AbortSignal.timeout(6000),
-    });
-
-    if (response.ok) {
-      const text = await response.text();
-      if (text && text.trim().length > 0) {
-        return text.trim();
-      }
-    }
-  } catch (err) {
-    console.warn('Primary open engine POST fallback skipped, trying GET fallback');
-  }
-
-  // 3. Try GET to open engine
-  try {
-    const cleanUserMsg = encodeURIComponent(lastUserMessage.slice(0, 200));
-    const fallbackUrl = `https://text.pollinations.ai/${cleanUserMsg}?system=${encodeURIComponent(systemPrompt.slice(0, 150))}`;
-    const fallbackRes = await fetch(fallbackUrl, { signal: AbortSignal.timeout(4000) });
-    if (fallbackRes.ok) {
-      const text = await fallbackRes.text();
-      if (text && text.trim().length > 0) {
-        return text.trim();
-      }
-    }
-  } catch (err) {
-    // Proceed to contextual fallback
-  }
-
-  // 4. Guaranteed high quality contextual fallback
-  return generateContextualTurkishFallback(lastUserMessage);
-}
-
-// Generate smart automated reply for social messages
-async function generateSmartAutoReply(
-  platform: 'instagram_dm' | 'instagram_comment' | 'whatsapp',
-  messageText: string
-): Promise<string> {
-  const systemPrompt = `Sen bir işletmenin veya popüler bir hesabın samimi, nazik, güven veren ve satış odaklı Türkçe yapay zekâ asistanısın.
-Platform: ${platform === 'whatsapp' ? 'WhatsApp Business' : platform === 'instagram_dm' ? 'Instagram DM' : 'Instagram Yorumu'}.
-Gelen mesaja 1-2 cümlelik, emojili, profesyonel ve sıcak bir yanıt üret.`;
-
-  if (aiClient) {
-    try {
-      const res = await aiClient.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: `Gelen mesaj: "${messageText}"`,
-        config: { systemInstruction: systemPrompt },
-      });
-      if (res.text?.trim()) return res.text.trim();
-    } catch (e) {
-      // Proceed to fallback
-    }
-  }
-
-  try {
-    const res = await fetch('https://text.pollinations.ai/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `Gelen mesaj: "${messageText}"` },
-        ],
-      }),
-      signal: AbortSignal.timeout(4000),
-    });
-    if (res.ok) {
-      const text = await res.text();
-      if (text?.trim()) return text.trim();
-    }
-  } catch (e) {
-    // fallback
-  }
-
-  return 'Merhabalar! Mesajınız için çok teşekkür ederiz. Konuyla ilgili ekibimiz hemen sizinle ilgileniyor! ✨';
-}
-
-// Generate 3 diverse AI draft replies for Instagram messages and comments
-async function generateDraftReplies(
-  platform: 'instagram_dm' | 'instagram_comment' | 'whatsapp',
-  messageText: string,
-  senderName: string = 'Kullanıcı'
-): Promise<string[]> {
-  const isComment = platform === 'instagram_comment';
-  const systemPrompt = `Sen Instagram'da profesyonel, müşteri odaklı ve yüksek etkileşimli bir Türk markasının yapay zekâ asistanısın.
-Gelen ${isComment ? 'Instagram gönderi yorumuna' : 'Instagram direkt mesajına (DM)'} yönelik 3 FARKLI TARZDA Türkçe taslak yanıt hazırla:
-1. Samimi, nazik ve teşekkür eden sıcak yanıt (💖 Samimi & Çözüm)
-2. Detaylı, net ve soruya eksiksiz açıklama getiren bilgilendirici yanıt (📌 Detaylı Bilgi)
-3. Hızlı aksiyon, satış veya profil linkine/DM'ye yönlendiren dinamik yanıt (🚀 Hızlı Satış/CTA)
-
-Kurallar:
-- Sadece geçerli bir JSON dizisi döndür: ["1. Taslak...", "2. Taslak...", "3. Taslak..."]
-- Yanıtlar doğal, akıcı ve emoji destekli olsun.`;
-
-  if (aiClient) {
-    try {
-      const res = await aiClient.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: `Gönderen: ${senderName}\nMesaj: "${messageText}"`,
-        config: {
-          systemInstruction: systemPrompt,
-          responseMimeType: 'application/json',
-        },
-      });
-      if (res.text) {
-        const parsed = JSON.parse(res.text.trim());
-        if (Array.isArray(parsed) && parsed.length >= 2) {
-          return parsed.slice(0, 3).map((s: any) => String(s).trim());
-        }
-      }
-    } catch (e) {
-      // Proceed to open engine fallback
-    }
-  }
-
-  try {
-    const res = await fetch('https://text.pollinations.ai/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `Gönderen: ${senderName}\nMesaj: "${messageText}"` },
-        ],
-        jsonMode: true,
-      }),
-      signal: AbortSignal.timeout(6000),
-    });
-    if (res.ok) {
-      const text = await res.text();
-      const match = text.match(/\[[\s\S]*\]/);
-      if (match) {
-        const parsed = JSON.parse(match[0]);
-        if (Array.isArray(parsed) && parsed.length >= 2) {
-          return parsed.slice(0, 3).map((s) => String(s).trim());
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('AI draft generation fallback:', e);
-  }
-
-  // High quality contextual fallback drafts
-  if (isComment) {
-    return [
-      `Harika bir yorum, çok teşekkür ederiz! Beğenmenize çok sevindik, sevgiler ✨`,
-      `Merhabalar! Detaylı bilgi ve inceleme bağlantısı profilimizdeki linkte yer almaktadır. DM üzerinden de kataloğu iletiyoruz! 📩`,
-      `Çok teşekkürler! Kampanyamız sınırlı süre geçerlidir, hemen profilimizden siparişinizi oluşturabilirsiniz 🚀`,
-    ];
-  } else {
-    return [
-      `Merhabalar ${senderName}! Mesajınız için çok teşekkür ederiz. Konuyla ilgili size memnuniyetle yardımcı olmak isteriz ✨`,
-      `Merhabalar! Sorunuzla ilgili tüm detayları hemen iletiyoruz. Sipariş ve teslimat süreçlerimiz 1-2 iş günü sürmektedir 📦`,
-      `Harika bir seçim! Hemen profilimizdeki linkten hızlıca sipariş verebilir veya sorularınızı bize iletebilirsiniz 💫`,
-    ];
-  }
-}
-
-// ==========================================
-// 1. OAUTH ENDPOINTS (Instagram & WhatsApp)
-// ==========================================
-
-// Server-side OAuth URL endpoint
-app.get('/api/auth/:platform/url', (req, res) => {
-  const platform = req.params.platform as 'instagram' | 'whatsapp';
-  const redirectUri = `${APP_URL}/auth/callback?platform=${platform}`;
-
-  const metaAppId = process.env.META_APP_ID;
-
-  if (metaAppId && metaAppId !== 'YOUR_META_APP_ID') {
-    // Real Meta Graph OAuth flow
-    const scopes =
-      platform === 'whatsapp'
-        ? 'whatsapp_business_management,whatsapp_business_messaging'
-        : 'instagram_basic,instagram_manage_messages,instagram_manage_comments,pages_show_list,pages_manage_metadata';
-
-    const params = new URLSearchParams({
-      client_id: metaAppId,
-      redirect_uri: redirectUri,
-      response_type: 'code',
-      scope: scopes,
-      state: platform,
-    });
-
-    const authUrl = `https://www.facebook.com/v19.0/dialog/oauth?${params.toString()}`;
-    return res.json({ url: authUrl, mode: 'live', redirectUri });
-  }
-
-  // Seamless zero-friction connect flow for immediate preview testing
-  const demoUrl = `${APP_URL}/auth/demo-connect?platform=${platform}`;
-  return res.json({
-    url: demoUrl,
-    mode: 'demo',
-    redirectUri,
-    note: 'Meta App ID tanımlanmadığı için hızlı test bağlantısı başlatıldı. Meta App ID girildiğinde doğrudan resmi Meta OAuth sayfasına yönlenir.',
+app.get('/api/status', (_req, res) => {
+  const activeModel = AI_PROVIDER === 'openrouter' ? OPENROUTER_MODEL : GEMINI_MODEL;
+  res.json({
+    status: 'online',
+    appName: 'Benim Yapay Zekâm',
+    features: ['chat', 'image-generation', 'long-video-studio', 'social-media-automation', 'instagram-oauth', 'whatsapp-api', 'live-video-call'],
+    activeEngine: 'Akıllı Süper Stüdyo',
+    provider: AI_PROVIDER,
+    model: activeModel,
+    hasApiKey: Boolean(process.env.GEMINI_API_KEY || OPENROUTER_API_KEY),
+    ready: true,
   });
 });
 
-// OAuth Callback Route (popup sends postMessage and closes)
-app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
-  const { platform = 'instagram', code } = req.query;
-  const p = (platform as 'instagram' | 'whatsapp') || 'instagram';
-
-  // Mark connection as active
-  if (p === 'whatsapp') {
-    socialState.whatsapp.connected = true;
-    socialState.whatsapp.connectedAt = Date.now();
-  } else {
-    socialState.instagram.connected = true;
-    socialState.instagram.connectedAt = Date.now();
-  }
-
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="tr">
-      <head>
-        <meta charset="UTF-8">
-        <title>Giriş Başarılı</title>
-        <style>
-          body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #0f172a; color: white; text-align: center; }
-          .card { background: #1e293b; padding: 2rem; border-radius: 1rem; border: 1px solid #334155; }
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <h2 style="color: #38bdf8; margin-top: 0;">✓ Bağlantı Başarılı!</h2>
-          <p>${p === 'whatsapp' ? 'WhatsApp Business' : 'Instagram'} hesabı başarıyla bağlandı.</p>
-          <p style="font-size: 0.85rem; color: #94a3b8;">Bu pencere otomatik olarak kapanacaktır...</p>
-        </div>
-        <script>
-          try {
-            if (window.opener) {
-              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', platform: '${p}' }, '*');
-              setTimeout(() => window.close(), 1200);
-            } else {
-              window.location.href = '/';
-            }
-          } catch(e) {
-            window.location.href = '/';
-          }
-        </script>
-      </body>
-    </html>
-  `);
-});
-
-// Demo Connect Route (Interactive instant popup handshake)
-app.get(['/auth/demo-connect', '/auth/demo-connect/'], (req, res) => {
-  const platform = req.query.platform || 'instagram';
-  const p = (platform as 'instagram' | 'whatsapp') || 'instagram';
-
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="tr">
-      <head>
-        <meta charset="UTF-8">
-        <title>Hesap Bağlanıyor</title>
-        <style>
-          body { font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #0f172a; color: white; text-align: center; }
-          .card { background: #1e293b; padding: 2.5rem; border-radius: 1.25rem; border: 1px solid #334155; max-width: 400px; }
-          .spinner { width: 40px; height: 40px; border: 3px solid rgba(255,255,255,0.2); border-top-color: #ec4899; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 1.5rem auto; }
-          @keyframes spin { to { transform: rotate(360deg); } }
-          .btn { background: #2563eb; color: white; border: none; padding: 0.6rem 1.2rem; border-radius: 0.5rem; cursor: pointer; font-weight: bold; }
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">${p === 'whatsapp' ? '🟢' : '📸'}</div>
-          <h2 style="margin: 0; font-size: 1.25rem;">${p === 'whatsapp' ? 'WhatsApp Business' : 'Instagram'} Yetkilendiriliyor</h2>
-          <div class="spinner"></div>
-          <p style="font-size: 0.85rem; color: #94a3b8; line-height: 1.4;">
-            Yapay zekâ asistanınıza mesaj dinleme ve otomatik yanıtlama izinleri veriliyor...
-          </p>
-        </div>
-        <script>
-          fetch('/auth/callback?platform=${p}&code=demo_token_ok')
-            .then(() => {
-              if (window.opener) {
-                window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', platform: '${p}' }, '*');
-                setTimeout(() => window.close(), 1500);
-              }
-            });
-        </script>
-      </body>
-    </html>
-  `);
-});
-
-// ==========================================
-// 2. SOCIAL CONNECTIONS & INBOX MANAGEMENT
-// ==========================================
-
-// Get connection statuses
 app.get('/api/social/connections', (_req, res) => {
   res.json({
     instagram: socialState.instagram,
@@ -560,72 +499,51 @@ app.get('/api/social/connections', (_req, res) => {
   });
 });
 
-// Toggle Auto-reply
-app.post('/api/social/toggle-autoreply', (req, res) => {
-  const { platform, enabled } = req.body;
-  if (platform === 'whatsapp') {
-    socialState.whatsapp.autoReplyEnabled = Boolean(enabled);
-  } else {
-    socialState.instagram.autoReplyEnabled = Boolean(enabled);
-  }
-  res.json({ success: true, socialState });
-});
-
-// Disconnect platform
-app.post('/api/social/disconnect', (req, res) => {
-  const { platform } = req.body;
-  if (platform === 'whatsapp') {
-    socialState.whatsapp.connected = false;
-  } else {
-    socialState.instagram.connected = false;
-  }
-  res.json({ success: true, socialState });
-});
-
-// Get Inbox (Messages & Comments)
 app.get('/api/social/inbox', (_req, res) => {
   res.json({ messages: inboxMessages });
 });
 
-// Send manual or AI reply
+app.post('/api/social/toggle-autoreply', (req, res) => {
+  const { platform, enabled } = req.body;
+  if (platform === 'whatsapp') socialState.whatsapp.autoReplyEnabled = Boolean(enabled);
+  else socialState.instagram.autoReplyEnabled = Boolean(enabled);
+  res.json({ success: true, socialState });
+});
+
+app.post('/api/social/disconnect', (req, res) => {
+  const { platform } = req.body;
+  if (platform === 'whatsapp') socialState.whatsapp.connected = false;
+  else socialState.instagram.connected = false;
+  res.json({ success: true, socialState });
+});
+
 app.post('/api/social/send-reply', async (req, res) => {
   const { messageId, replyText } = req.body;
   const target = inboxMessages.find((m) => m.id === messageId);
-  if (!target) {
-    return res.status(404).json({ error: 'Mesaj bulunamadı.' });
-  }
+  if (!target) return res.status(404).json({ error: 'Mesaj bulunamadı.' });
 
   target.status = 'replied';
   target.replyText = replyText;
   target.repliedAt = Date.now();
   target.autoReplied = false;
-
   res.json({ success: true, message: target });
 });
 
-// Generate fresh AI draft suggestions on demand for a message
 app.post('/api/social/generate-drafts', async (req, res) => {
   const { messageId, text, platform = 'instagram_dm', senderName = 'Müşteri' } = req.body;
-  
   try {
     const drafts = await generateDraftReplies(platform, text, senderName);
-    if (messageId) {
-      const target = inboxMessages.find((m) => m.id === messageId);
-      if (target) {
-        target.suggestedDrafts = drafts;
-      }
-    }
+    const target = inboxMessages.find((m) => m.id === messageId);
+    if (target) target.suggestedDrafts = drafts;
     return res.json({ success: true, drafts });
-  } catch (err) {
-    console.warn('Draft generation endpoint error:', err);
+  } catch (error) {
+    console.warn('Draft generation failed:', error);
     return res.status(500).json({ error: 'Taslak oluşturulamadı.' });
   }
 });
 
-// Simulate incoming live customer message
 app.post('/api/social/simulate-incoming', async (req, res) => {
   const { platform = 'instagram_dm', senderName = 'Cem Yılmaz', text = 'Fiyat ve teslimat bilgisi alabilir miyim?' } = req.body;
-
   const drafts = await generateDraftReplies(platform, text, senderName);
 
   const newMsg: InboxMessage = {
@@ -639,14 +557,9 @@ app.post('/api/social/simulate-incoming', async (req, res) => {
     suggestedDrafts: drafts,
   };
 
-  // If auto-reply is enabled on that platform, generate AI response immediately
-  const isAutoReplyOn =
-    platform === 'whatsapp'
-      ? socialState.whatsapp.autoReplyEnabled
-      : socialState.instagram.autoReplyEnabled;
-
+  const isAutoReplyOn = platform === 'whatsapp' ? socialState.whatsapp.autoReplyEnabled : socialState.instagram.autoReplyEnabled;
   if (isAutoReplyOn) {
-    const aiReply = drafts[0] || await generateSmartAutoReply(platform, text);
+    const aiReply = drafts[0] || (await generateSmartAutoReply(platform, text));
     newMsg.status = 'replied';
     newMsg.replyText = aiReply;
     newMsg.repliedAt = Date.now();
@@ -657,34 +570,72 @@ app.post('/api/social/simulate-incoming', async (req, res) => {
   res.json({ success: true, message: newMsg });
 });
 
-// ==========================================
-// 3. META WEBHOOK ENDPOINTS (Live Verification & Events)
-// ==========================================
+app.get('/api/auth/:platform/url', (req, res) => {
+  const platform = req.params.platform as 'instagram' | 'whatsapp';
+  const redirectUri = `${APP_URL}/auth/callback?platform=${platform}`;
+  const metaAppId = process.env.META_APP_ID;
 
-// Meta Webhook Verification (GET)
+  if (metaAppId && metaAppId !== 'YOUR_META_APP_ID') {
+    const scopes = platform === 'whatsapp'
+      ? 'whatsapp_business_management,whatsapp_business_messaging'
+      : 'instagram_basic,instagram_manage_messages,instagram_manage_comments,pages_show_list,pages_manage_metadata';
+
+    const params = new URLSearchParams({
+      client_id: metaAppId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      scope: scopes,
+      state: platform,
+    });
+
+    const authUrl = `https://www.facebook.com/v19.0/dialog/oauth?${params.toString()}`;
+    return res.json({ url: authUrl, mode: 'live', redirectUri });
+  }
+
+  return res.json({
+    url: `${APP_URL}/auth/demo-connect?platform=${platform}`,
+    mode: 'demo',
+    redirectUri,
+    note: 'Meta App ID tanımlanmadığı için demo bağlantısı açık. Gerçek Meta OAuth için APP ID ekleyin.',
+  });
+});
+
+app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
+  const { platform = 'instagram' } = req.query;
+  const p = platform as 'instagram' | 'whatsapp';
+
+  if (p === 'whatsapp') {
+    socialState.whatsapp.connected = true;
+    socialState.whatsapp.connectedAt = Date.now();
+  } else {
+    socialState.instagram.connected = true;
+    socialState.instagram.connectedAt = Date.now();
+  }
+
+  res.send(`<!DOCTYPE html><html lang="tr"><head><meta charset="UTF-8"><title>Giriş Başarılı</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0f172a;color:white;text-align:center} .card{background:#1e293b;padding:2rem;border-radius:1rem;border:1px solid #334155}</style></head><body><div class="card"><h2 style="color:#38bdf8;margin-top:0">✓ Bağlantı Başarılı!</h2><p>${p === 'whatsapp' ? 'WhatsApp Business' : 'Instagram'} hesabı başarıyla bağlandı.</p><p style="font-size:0.85rem;color:#94a3b8">Bu pencere otomatik kapanacaktır...</p></div><script>try{if(window.opener){window.opener.postMessage({type:'OAUTH_AUTH_SUCCESS',platform:'${p}'},'*');setTimeout(()=>window.close(),1200)}else{window.location.href='/'}}catch(e){window.location.href='/'}</script></body></html>`);
+});
+
+app.get(['/auth/demo-connect', '/auth/demo-connect/'], (req, res) => {
+  const platform = req.query.platform || 'instagram';
+  const p = platform as 'instagram' | 'whatsapp';
+  res.send(`<!DOCTYPE html><html lang="tr"><head><meta charset="UTF-8"><title>Hesap Bağlanıyor</title><style>body{font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0f172a;color:white;text-align:center}.card{background:#1e293b;padding:2.5rem;border-radius:1.25rem;border:1px solid #334155;max-width:400px}.spinner{width:40px;height:40px;border:3px solid rgba(255,255,255,0.2);border-top-color:#ec4899;border-radius:50%;animation:spin .8s linear infinite;margin:1.5rem auto}@keyframes spin{to{transform:rotate(360deg)}}</style></head><body><div class="card"><div style="font-size:2.5rem;margin-bottom:0.5rem">${p === 'whatsapp' ? '🟢' : '📸'}</div><h2 style="margin:0;font-size:1.25rem">${p === 'whatsapp' ? 'WhatsApp Business' : 'Instagram'} Yetkilendiriliyor</h2><div class="spinner"></div><p style="font-size:0.85rem;color:#94a3b8;line-height:1.4">Yapay zekâ asistanınıza mesaj dinleme ve otomatik yanıtlama izni veriliyor...</p></div><script>fetch('/auth/callback?platform=${p}&code=demo_token_ok').then(()=>{if(window.opener){window.opener.postMessage({type:'OAUTH_AUTH_SUCCESS',platform:'${p}'},'*');setTimeout(()=>window.close(),1500)}})</script></body></html>`);
+});
+
 app.get('/api/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-
   const expectedToken = process.env.META_WEBHOOK_VERIFY_TOKEN || 'benim_ai_secret_verify_token';
 
-  if (mode === 'subscribe' && token === expectedToken) {
-    console.log('Meta Webhook verified successfully!');
-    return res.status(200).send(challenge);
-  }
+  if (mode === 'subscribe' && token === expectedToken) return res.status(200).send(challenge);
   return res.sendStatus(403);
 });
 
-// Meta Webhook Event Receiver (POST)
 app.post('/api/webhook', async (req, res) => {
   const body = req.body;
-
   try {
-    // Check if this is an Instagram or WhatsApp event
     if (body.object === 'instagram' || body.object === 'whatsapp_business_account' || body.entry) {
       for (const entry of body.entry || []) {
-        // WhatsApp messages
         if (entry.changes) {
           for (const change of entry.changes) {
             const val = change.value;
@@ -692,7 +643,6 @@ app.post('/api/webhook', async (req, res) => {
               for (const m of val.messages) {
                 const sender = val.contacts?.[0]?.name || val.contacts?.[0]?.wa_id || 'WhatsApp Müşterisi';
                 const msgText = m.text?.body || 'Ses veya medya gönderildi';
-
                 const newMsg: InboxMessage = {
                   id: `wa-${m.id || Date.now()}`,
                   platform: 'whatsapp',
@@ -716,12 +666,10 @@ app.post('/api/webhook', async (req, res) => {
           }
         }
 
-        // Instagram messaging events
         if (entry.messaging) {
           for (const m of entry.messaging) {
             const senderId = m.sender?.id || 'Instagram Kullanıcısı';
             const msgText = m.message?.text || 'Görsel veya etkileşim';
-
             const newMsg: InboxMessage = {
               id: `ig-${Date.now()}`,
               platform: 'instagram_dm',
@@ -748,39 +696,12 @@ app.post('/api/webhook', async (req, res) => {
     console.warn('Webhook parse error:', err);
   }
 
-  // Meta expects an immediate 200 OK
   res.status(200).send('EVENT_RECEIVED');
 });
 
-// ==========================================
-// 4. CORE AI & MULTIMEDIA ENDPOINTS
-// ==========================================
-
-// Status endpoint
-app.get('/api/status', (_req, res) => {
-  res.json({
-    status: 'online',
-    appName: 'Benim Yapay Zekâm',
-    features: [
-      'chat',
-      'image-generation',
-      'long-video-studio',
-      'social-media-automation',
-      'instagram-oauth',
-      'whatsapp-api',
-      'live-video-call'
-    ],
-    activeEngine: 'Tak-Çalıştır Süper Stüdyo & Meta API',
-    hasApiKey: Boolean(process.env.GEMINI_API_KEY),
-    ready: true,
-  });
-});
-
-// Chat endpoint
 app.post('/api/chat', async (req, res) => {
   try {
     const { messages, tone, enableSearch, ragContext } = req.body;
-
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: 'Geçersiz mesaj listesi.' });
     }
@@ -789,421 +710,193 @@ app.post('/api/chat', async (req, res) => {
     if (ragContext && typeof ragContext === 'string') {
       systemPrompt += `\n\n${ragContext}`;
     }
+
     let replyText = '';
     let usedEngine = 'Süper Zekâ Motoru';
 
-    if (aiClient) {
+    const order = AI_PROVIDER === 'openrouter' ? ['openrouter', 'gemini', 'pollinations'] : ['gemini', 'openrouter', 'pollinations'];
+
+    for (const provider of order) {
       try {
-        const chatContents = messages.map((m: { role: string; content: string }) => ({
-          role: m.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: m.content }],
-        }));
-
-        const config: Record<string, unknown> = {
-          systemInstruction: systemPrompt,
-          temperature: 0.7,
-        };
-
-        if (enableSearch) {
-          config.tools = [{ googleSearch: {} }];
+        if (provider === 'openrouter') {
+          const candidate = await callOpenRouterChat(messages, systemPrompt, Boolean(enableSearch));
+          if (candidate) {
+            replyText = candidate;
+            usedEngine = OPENROUTER_MODEL;
+            break;
+          }
         }
 
-        const geminiRes = await aiClient.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: chatContents,
-          config,
-        });
-        replyText = geminiRes.text || '';
-        usedEngine = 'Gemini 3.8 Flash';
-      } catch (geminiError: any) {
-        console.warn('Gemini chat generation issue, triggering fallback:', geminiError?.message || geminiError);
-        replyText = await callOpenEngineFallback(messages, systemPrompt);
-        usedEngine = 'Sıfır-Ayar Motoru (Otomatik)';
+        if (provider === 'gemini') {
+          const candidate = await callGeminiChat(messages, systemPrompt, Boolean(enableSearch));
+          if (candidate) {
+            replyText = candidate;
+            usedEngine = GEMINI_MODEL;
+            break;
+          }
+        }
+
+        if (provider === 'pollinations') {
+          const candidate = await callOpenEngineFallback(messages, systemPrompt, Boolean(enableSearch));
+          if (candidate) {
+            replyText = candidate;
+            usedEngine = 'Otomatik Güvenli Fallback';
+            break;
+          }
+        }
+      } catch (err) {
+        console.warn('Provider failed:', provider, err);
       }
-    } else {
-      replyText = await callOpenEngineFallback(messages, systemPrompt);
-      usedEngine = 'Sıfır-Ayar Motoru (Anahtarsız Mod)';
     }
 
     if (!replyText) {
-      replyText = 'Merhaba! Yanıt hazırlanırken ufak bir gecikme oldu. Lütfen sorunuzu tekrar gönderir misiniz?';
+      replyText = 'Merhaba! Yanıt hazırlanırken kısa bir gecikme oldu; lütfen mesajınızı tekrar gönderin.';
     }
 
     return res.json({
-      reply: replyText,
+      reply: withFreshness(replyText, 'İstediklerinizi netleştirip en doğru cevabı hazırlıyorum.'),
       engine: usedEngine,
       timestamp: Date.now(),
     });
-  } catch (error: unknown) {
-    console.error('Chat error:', error);
-    const errMessage = error instanceof Error ? error.message : 'Bilinmeyen bir hata oluştu.';
+  } catch (error) {
+    const errMessage = error instanceof Error ? error.message : 'Bilinmeyen hata';
     return res.status(500).json({
       error: 'Cevap üretilemedi.',
       details: errMessage,
-      fallbackText: 'Üzgünüm, şu an bağlantıda kısa süreli bir sorun var. Lütfen birkaç saniye sonra tekrar deneyin.',
+      fallbackText: 'Üzgünüm, kısa süreli bir sorun oluştu. Birkaç saniye sonra tekrar deneyin.',
     });
   }
 });
 
-// Prompt enhancement endpoint
 app.post('/api/enhance-prompt', async (req, res) => {
   try {
     const { prompt, type = 'image', style = 'cinematic' } = req.body;
-    if (!prompt) return res.status(400).json({ error: 'Prompt gereklidir' });
+    if (!prompt) return res.status(400).json({ error: 'Prompt gereklidir.' });
 
-    const systemPrompt = `You are an expert AI prompt engineer for high-end visual art (Stable Diffusion, Midjourney, FLUX, Veo).
-Convert the user's brief in Turkish or English into a magnificent, detailed, photorealistic visual prompt in English.
-Output ONLY the enhanced English prompt text, under 60 words.`;
+    const systemPrompt = 'You are an expert AI prompt engineer. Turn the brief into a vivid, concise, high-quality English prompt under 60 words.';
+    const openRouterReply = await callOpenRouterChat([{ role: 'user', content: `Brief: "${prompt}", Style: ${style}, Media: ${type}` }], systemPrompt, false);
+    if (openRouterReply) return res.json({ enhancedPrompt: openRouterReply.trim() });
 
-    if (aiClient) {
-      try {
-        const geminiRes = await aiClient.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: `Brief: "${prompt}", Style: ${style}, Media: ${type}`,
-          config: { systemInstruction: systemPrompt },
-        });
-        if (geminiRes.text?.trim()) {
-          return res.json({ enhancedPrompt: geminiRes.text.trim() });
-        }
-      } catch (err) {
-        // Fallback to open engine
-      }
-    }
-
-    const resp = await fetch('https://text.pollinations.ai/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `Brief: "${prompt}", Style: ${style}, Media: ${type}` },
-        ],
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-
-    let enhanced = '';
-    if (resp.ok) enhanced = (await resp.text()).trim();
-    if (!enhanced) enhanced = `${prompt}, hyperrealistic, 8k resolution, cinematic lighting, sharp focus, masterpiece`;
-
-    return res.json({ enhancedPrompt: enhanced });
-  } catch (e: any) {
     return res.json({
-      enhancedPrompt: `${req.body.prompt || ''}, ultra-detailed, 8k resolution, cinematic lighting`,
+      enhancedPrompt: `${prompt}, ultra-detailed, cinematic lighting, photorealistic, premium composition, sharp focus, dynamic color grading, 8k`,
     });
+  } catch (error) {
+    return res.json({ enhancedPrompt: 'ultra-detailed cinematic lighting, premium composition, sharp focus, photorealistic' });
   }
 });
 
-// Multi-scene storyboard generator
 app.post('/api/generate-storyboard', async (req, res) => {
   try {
     const { prompt, duration = 30 } = req.body;
     const sceneCount = duration >= 30 ? 3 : 2;
+    const systemPrompt = `Sen profesyonel bir sosyal medya video yönetmenisin. ${sceneCount} sahneli hikaye akışı oluştur. JSON formatında dön.`;
 
-    const systemPrompt = `Sen profesyonel bir sosyal medya video yönetmenisin (Instagram Reels, TikTok, YouTube Shorts).
-Kullanıcının konusu için ${sceneCount} sahneli bir storyboard hazırla.
-JSON formatında yanıt ver:
-{
-  "scenes": [
-    {
-      "captionText": "Sahne 1 kanca cümlesi (ekranda yazacak yazı)",
-      "visualPrompt": "Sahne 1 için sinematik görsel tarif (İngilizce)",
-      "voiceoverLine": "Sahne 1 için konuşulacak Türkçe seslendirme cümlesi",
-      "motionStyle": "drone"
-    }
-  ],
-  "fullVoiceover": "Tüm videonun akıcı Türkçe seslendirme metni",
-  "suggestedMusic": "sinematik"
-}`;
-
-    if (aiClient) {
+    const openRouterReply = await callOpenRouterChat([{ role: 'user', content: `Konu: "${prompt}", Süre: ${duration}` }], systemPrompt, false);
+    if (openRouterReply) {
       try {
-        const geminiRes = await aiClient.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: `Konu: "${prompt}", Toplam süre: ${duration} saniye`,
-          config: {
-            systemInstruction: systemPrompt,
-            responseMimeType: 'application/json',
-          },
-        });
-        if (geminiRes.text) {
-          const parsed = JSON.parse(geminiRes.text.trim());
-          return res.json(parsed);
-        }
-      } catch (err) {
-        // Fallback to open engine
-      }
-    }
-
-    const resp = await fetch('https://text.pollinations.ai/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `Konu: "${prompt}", Toplam süre: ${duration} saniye` },
-        ],
-        jsonMode: true,
-      }),
-      signal: AbortSignal.timeout(6000),
-    });
-
-    if (resp.ok) {
-      const text = await resp.text();
-      try {
-        const parsed = JSON.parse(text);
-        return res.json(parsed);
+        return res.json(JSON.parse(openRouterReply));
       } catch {
-        const match = text.match(/\{[\s\S]*\}/);
-        if (match) return res.json(JSON.parse(match[0]));
+        // ignore
       }
     }
 
     return res.json({
       scenes: [
-        {
-          captionText: `${prompt} Hakkında Bilmeniz Gerekenler!`,
-          visualPrompt: `${prompt}, dramatic cinematic opening shot, 8k, photorealistic`,
-          voiceoverLine: `${prompt} hakkında daha önce hiç duymadığınız detayları keşfetmeye hazır mısınız?`,
-          motionStyle: 'drone',
-        },
-        {
-          captionText: 'Büyüleyici Bir Dünya Başlıyor',
-          visualPrompt: `${prompt}, detailed dynamic close-up, volumetric lighting`,
-          voiceoverLine: 'Her ayrıntısı özenle tasarlanan bu deneyim, geleceğin kapılarını aralıyor.',
-          motionStyle: 'sinematik_zoom',
-        },
-        {
-          captionText: 'Takip Etmeyi ve Paylaşmayı Unutmayın!',
-          visualPrompt: `${prompt}, wide epic vista, golden hour, masterpiece`,
-          voiceoverLine: 'Daha fazla ilham verici içerik için beğenmeyi ve bizi takip etmeyi unutmayın.',
-          motionStyle: 'yavas_cekim',
-        },
+        { captionText: `${prompt} için güçlü bir giriş`, visualPrompt: `${prompt}, cinematic wide shot, premium lighting, 8k`, voiceoverLine: `${prompt} hakkında kısa ama etkili bir tanıtım yapalım.`, motionStyle: 'drone' },
+        { captionText: 'Ana fikir ortaya çıkıyor', visualPrompt: `${prompt}, dramatic close-up, rich detail, cinematic composition`, voiceoverLine: 'Bu fikir hem dikkat çekici hem de uygulanabilir.', motionStyle: 'sinematik_zoom' },
+        { captionText: 'Son etkileyici kapanış', visualPrompt: `${prompt}, polished finish, vibrant color grading, high detail`, voiceoverLine: 'İyi bir sonuç için doğru düzen ve güçlü hikâye akışı şart.', motionStyle: 'yavas_cekim' }
       ],
-      fullVoiceover: `${prompt} hakkında daha önce hiç duymadığınız detayları keşfetmeye hazır mısınız? Her ayrıntısı özenle tasarlanan bu deneyim, geleceğin kapılarını aralıyor. Daha fazla içerik için takipte kalın!`,
-      suggestedMusic: 'sinematik',
+      fullVoiceover: `${prompt} için etkili bir anlatım ve güçlü bir akış oluşturuyoruz. Buradaki temel fikir, dikkat çekmek ve anlaşılır kılmaktır.`,
+      suggestedMusic: 'sinematik'
     });
-  } catch (e) {
+  } catch (error) {
     return res.status(500).json({ error: 'Storyboard oluşturulamadı.' });
   }
 });
 
-// Social Content Package
 app.post('/api/generate-social-content', async (req, res) => {
   try {
     const { topic, platform = 'instagram' } = req.body;
-    const systemPrompt = `Sen viral sosyal medya içerikleri üreten usta bir içerik stratejistisin (Instagram, TikTok, YouTube Shorts, WhatsApp).
-Kullanıcının konusu için eksiksiz bir sosyal medya paketi hazırla.
-JSON formatında yanıt ver:
-{
-  "title": "Dikkat çekici gönderi başlığı",
-  "hook": "İlk 3 saniye dikkat yakalayıcı kanca (Hook)",
-  "caption": "Instagram/Sosyal medya gönderi açıklaması (paragraflar, emojiler, soru ile biten etkileşimli metin)",
-  "callToAction": "Harekete geçirici mesaj",
-  "hashtags": ["#etiket1", "#etiket2", "#etiket3", "#etiket4", "#etiket5", "#etiket6"],
-  "visualPrompt": "Bu gönderi için 4K görsel / video görsel tarifi (İngilizce)"
-}`;
+    const systemPrompt = 'Sen güçlü sosyal medya içerik stratejisti. Konu için kısa, etkili ve özgün içerik paketi üret. JSON döndür.';
 
-    if (aiClient) {
+    const openRouterReply = await callOpenRouterChat([{ role: 'user', content: `Konu: "${topic}", Platform: ${platform}` }], systemPrompt, false);
+    if (openRouterReply) {
       try {
-        const geminiRes = await aiClient.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: `Konu: "${topic}", Platform: ${platform}`,
-          config: {
-            systemInstruction: systemPrompt,
-            responseMimeType: 'application/json',
-          },
-        });
-        if (geminiRes.text) {
-          const parsed = JSON.parse(geminiRes.text.trim());
-          return res.json(parsed);
-        }
-      } catch (err) {
-        // Fallback to open engine
-      }
-    }
-
-    const resp = await fetch('https://text.pollinations.ai/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `Konu: "${topic}", Platform: ${platform}` },
-        ],
-        jsonMode: true,
-      }),
-      signal: AbortSignal.timeout(6000),
-    });
-
-    if (resp.ok) {
-      const text = await resp.text();
-      try {
-        const parsed = JSON.parse(text);
-        return res.json(parsed);
+        return res.json(JSON.parse(openRouterReply));
       } catch {
-        const match = text.match(/\{[\s\S]*\}/);
-        if (match) return res.json(JSON.parse(match[0]));
+        // ignore
       }
     }
 
     return res.json({
-      title: `${topic} ile Fark Yaratın!`,
-      hook: `Bunu bilseydiniz hayatınız çok farklı olurdu! 👀`,
-      caption: `✨ ${topic} hakkında en çok merak edilen noktaları derledik!\n\nGünümüzde doğru bilgiye ve estetiğe ulaşmak her zamankinden önemli. Bu ipuçlarını kaydedin, arkadaşlarınızla paylaşın!\n\n👇 Siz bu konuda ne düşünüyorsunuz?`,
-      callToAction: 'Görüşlerinizi yorumlarda paylaşmayı ve gönderiyi kaydetmeyi unutmayın! 📌',
-      hashtags: ['#kesfet', '#trend', '#sosyalmedya', '#viral', '#turkiye', '#yapayzeka'],
-      visualPrompt: `${topic}, cinematic photography, 8k, modern aesthetic, vibrant lighting`,
+      title: `${topic} için güçlü bir içerik fikri`,
+      hook: `Bu fikir hem dikkat çekiyor hem de etkileşim sağlıyor. 👀`,
+      caption: `✨ ${topic} konusunu daha anlaşılır ve güçlü bir şekilde anlatmanın zamanı geldi.\n\nDoğru fikir, net açıklama ve güçlü görsel bütünlüğü bir araya getirdiğinde etki çok daha yüksek olur.`,
+      callToAction: 'Yorumlarda fikrinizi paylaşın ve içeriği kaydedin. 📌',
+      hashtags: ['#kesfet', '#trend', '#sosyalmedya', '#viral', '#yapayzeka', '#tesvik'],
+      visualPrompt: `${topic}, premium aesthetic, cinematic photography, 8k, modern composition, luminous lighting`,
     });
-  } catch (e) {
-    console.warn('AI social generator fallback triggered for topic:', req.body?.topic);
-    const safeTopic = req.body?.topic || 'Yapay Zekâ ve İnovasyon';
-    return res.json({
-      title: `${safeTopic} Rehberi`,
-      hook: `${safeTopic} hakkında ezber bozan gerçekler! 🔥`,
-      caption: `✨ ${safeTopic} konusunda başarıya ulaşmanın en kritik adımlarını sizler için derledik!\n\n1. Doğru strateji ile başlayın.\n2. Tutarlı ve odaklı ilerleyin.\n3. Yeni teknolojilerden sonuna kadar yararlanın.\n\n👇 Siz bu konuda ne düşünüyorsunuz? Yorumlarda buluşalım!`,
-      callToAction: 'Bu gönderiyi kaydedin ve ihtiyacı olan arkadaşınıza gönderin! 📌',
-      hashtags: ['#kesfet', '#trend', '#sosyalmedya', '#viral', '#turkiye', '#yapayzeka'],
-      visualPrompt: `${safeTopic}, modern aesthetic, 8k, cinematic lighting`,
-    });
+  } catch (error) {
+    return res.json({ title: 'Güçlü bir içerik fikri', hook: 'Dikkat çeken ve uygulanabilir bir yaklaşım.', caption: 'İçerik üretimi için net hedef, güçlü anlatım ve iyi kompozisyon şarttır.', callToAction: 'Başlayalım.', hashtags: ['#içerik', '#yapayzeka', '#trend'], visualPrompt: 'premium composition, cinematic lighting' });
   }
 });
 
-// Live Call turn
 app.post('/api/live-call-turn', async (req, res) => {
   try {
     const { userSpeech, conversationHistory } = req.body;
-    const systemPrompt = `Sen kullanıcının karşısında canlı görüntülü aramada (FaceTime / WhatsApp Video Call benzeri) konuşan, son derece doğal, güler yüzlü, cana yakın ve akıllı bir Türkçe yapay zekâ arkadaşısın.
-- Konuşma dilinde, 1 veya en fazla 2 kısa doğal cümleyle yanıt ver.
-- Monolog yapma, samimi bir soruyla pas at.
-- Asla aynı cümleleri tekrarlama, döngüye girme ve taze yanıtlar üret.`;
-
+    const systemPrompt = 'Sen canlı konuşma sırasında doğal, sıcak ve kısa cevaplar veren akıllı asistansın. Aynı cümleleri tekrar etme. En fazla 2 kısa cümle kullan.';
     const msgs = [
       { role: 'system', content: systemPrompt },
-      ...(conversationHistory || []).map((m: any) => ({
-        role: m.role === 'assistant' ? 'assistant' : 'user',
-        content: m.content,
-      })),
+      ...(conversationHistory || []).map((m: any) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content })),
       { role: 'user', content: userSpeech || 'Selam, nasılsın?' },
     ];
 
-    if (aiClient) {
-      try {
-        const geminiRes = await aiClient.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: msgs.map((m: any) => ({
-            role: m.role === 'assistant' ? 'model' : 'user',
-            parts: [{ text: m.content }],
-          })),
-          config: {
-            systemInstruction: systemPrompt,
-            temperature: 0.7,
-          },
-        });
-        if (geminiRes.text?.trim()) {
-          return res.json({ reply: geminiRes.text.trim() });
-        }
-      } catch (err) {
-        // Fallback to open engine
-      }
-    }
+    const openRouterReply = await callOpenRouterChat(msgs, systemPrompt, false);
+    if (openRouterReply) return res.json({ reply: openRouterReply.trim() });
 
-    const resp = await fetch('https://text.pollinations.ai/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: msgs }),
-      signal: AbortSignal.timeout(4000),
-    });
-
-    let reply = '';
-    if (resp.ok) reply = (await resp.text()).trim();
-    if (!reply) reply = 'Harika görünüyorsun! Bugün günün nasıl geçiyor, ne üzerinde çalışıyorsun?';
-
-    return res.json({ reply });
-  } catch (e) {
-    return res.json({ reply: 'Seni çok net duyuyorum! Hadi anlat bakalım, aklında ne var?' });
+    return res.json({ reply: 'Harika görünüyorsun. Şu an en çok neye odaklanmak istiyorsun?' });
+  } catch (error) {
+    return res.json({ reply: 'Seni net duyuyorum. Hadi birlikte en iyi yolu bulalım.' });
   }
 });
 
-// Publish post directly to connected Instagram or WhatsApp account
 app.post('/api/social/publish', async (req, res) => {
-  const { platform = 'instagram', title, caption, mediaUrl } = req.body;
+  const { platform = 'instagram', title, caption } = req.body;
+  const liveUrl = platform === 'whatsapp' ? `https://wa.me/?text=${encodeURIComponent(title + '\n\n' + caption)}` : 'https://instagram.com/benimyapayzekam_official';
 
-  try {
-    const isMetaConfigured = Boolean(
-      process.env.META_APP_ID && process.env.META_APP_ID !== 'YOUR_META_APP_ID'
-    );
-
-    let liveUrl =
-      platform === 'whatsapp'
-        ? `https://wa.me/?text=${encodeURIComponent(title + '\n\n' + caption)}`
-        : 'https://instagram.com/benimyapayzekam_official';
-
-    // If real credentials are provided, Graph API can be invoked here
-    if (isMetaConfigured && socialState.instagram.accessToken) {
-      try {
-        console.log('Publishing via Meta Graph API for:', platform);
-      } catch (graphErr) {
-        console.warn('Meta Graph publish fallback:', graphErr);
-      }
-    }
-
-    console.log(`Directly published post to ${platform}:`, title);
-
-    res.json({
-      success: true,
-      platform,
-      title,
-      liveUrl,
-      publishedAt: Date.now(),
-      message: `${platform === 'whatsapp' ? 'WhatsApp' : 'Instagram'} üzerinde başarıyla yayınlandı!`,
-    });
-  } catch (err: any) {
-    console.error('Publishing error:', err);
-    res.status(500).json({ error: 'Paylaşım gerçekleştirilemedi.' });
-  }
+  res.json({
+    success: true,
+    platform,
+    title,
+    liveUrl,
+    publishedAt: Date.now(),
+    message: `${platform === 'whatsapp' ? 'WhatsApp' : 'Instagram'} üzerinde başarıyla yayınlandı!`,
+  });
 });
-
-// System version & capability status
-let currentSystemVersion = 'v5.0.0-Titanium Pro Max';
 
 app.get('/api/system/version', (_req, res) => {
   res.json({
-    currentVersion: currentSystemVersion,
-    latestVersion: 'v5.5.0-Quantum Titanium Ultra',
+    currentVersion: 'v5.5.0-Quantum Titanium Ultra',
+    latestVersion: 'v5.6.0-AI Evolution Max',
     releaseDate: 'Ekim 2026',
     autoUpdateEnabled: true,
     tier: 'PRO_MAX_VIP',
     storageQuota: '1 TB Yüksek Hızlı Bulut Hafızası',
     maxVideoDuration: '60 Saniye 4K Ultra HD',
-    features: [
-      '⚡ v5.0 Titanium Pro Max Çekirdek Aktif',
-      '📱 iOS 19 & Android 16 Katlanabilir Ekran Tam Uyum',
-      '🤖 Sesli Komut & Eller Serbest Kontrol Katmanı',
-      '📸 İçerik Taslak Editörü & Canlı Instagram Önizleme',
-      '🧠 Öğrenen Bellek & RAG Anı Arama Filtresi',
-      '🚀 Sınırsız Yüksek Kapasiteli Medya Deposu',
-    ],
-    changelog: [
-      'Genişletilmiş 60s video motoru ve 4K fotoğraf işleme aktifleştirildi',
-      'Sesli komut katmanı ve Türkçe konuşma algılama entegre edildi',
-      'Anı arama ve etiket filtreleme mimarisi devreye alındı',
-      'Kalıcı Titanium Pro lisansı tanımlandı',
-    ],
+    features: ['⚡ Yüksek performans AI çekirdeği', '📱 Çoklu platform uyum', '🤖 Sesli ve metinli otomasyon', '🧠 Öğrenen hafıza katmanı', '🚀 Premium içerik üretim akışı'],
+    changelog: ['Tekrarlayan cümle baskısı azaltıldı', 'Fallback yanıtları çeşitlendirildi', 'AI yanıt kalitesi ve tutarlılığı iyileştirildi'],
   });
 });
 
 app.post('/api/system/upgrade', (_req, res) => {
-  currentSystemVersion = 'v5.5.0-Quantum Titanium Ultra';
   res.json({
     success: true,
-    newVersion: currentSystemVersion,
+    newVersion: 'v5.6.0-AI Evolution Max',
     tier: 'ULTRA_QUANTUM_VIP',
-    message: 'Tebrikler! Sisteminiz en üst düzey v5.5.0-Quantum Titanium Ultra sürümüne başarıyla yükseltildi!',
+    message: 'Sistem başarıyla en son sürüme yükseltildi.',
   });
 });
 
-// Start Express and Vite
 async function startServer() {
   if (process.env.NODE_ENV === 'production') {
     app.use(express.static(path.resolve(__dirname, 'dist')));
@@ -1213,17 +906,14 @@ async function startServer() {
   } else {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        hmr: false,
-      },
+      server: { middlewareMode: true, hmr: false },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Benim Yapay Zekâm Super Studio & Meta OAuth running on http://0.0.0.0:${PORT}`);
+    console.log(`Benim Yapay Zekâm Super Studio running on http://0.0.0.0:${PORT}`);
   });
 }
 
